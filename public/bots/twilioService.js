@@ -110,7 +110,19 @@ function startInboundWebhook(port = 3001, appCallbacks = {}) {
         const params = new URLSearchParams(raw);
         const msgBody = params.get('Body') || '';
         const from = params.get('From') || '';
-        const reply = await handleInboundSMS(msgBody, from, appCallbacks);
+
+        // First try remote control (routes free-form text to Claude)
+        let reply = null;
+        try {
+          const { handleRemoteSMS } = require('./remoteControlService');
+          reply = await handleRemoteSMS(msgBody, from);
+        } catch {}
+
+        // Fall back to fixed-command handler if remote control returned null
+        if (!reply) {
+          reply = await handleInboundSMS(msgBody, from, appCallbacks);
+        }
+
         const twiml = `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${reply}</Message></Response>`;
         res.writeHead(200, { 'Content-Type': 'text/xml' });
         res.end(twiml);

@@ -12,9 +12,15 @@ const {
   chat,
   chatStream,
   clearHistory,
-  getHistory
+  getHistory,
+  listSessions
 } = require('./claudeAgent');
 const { initSMTP, sendSingle } = require('./smtpService');
+const {
+  initRemoteControl,
+  startRemoteAPI,
+  getStats: getRemoteStats
+} = require('./remoteControlService');
 
 let initialized = false;
 
@@ -47,9 +53,16 @@ function initChatbot(settings, appCallbacks = {}) {
     initSMTP(settings.smtpUser, settings.smtpPass);
   }
 
+  // Remote control — HTTP API on port 3003, optional auth token
+  initRemoteControl({
+    authToken: settings.remoteControlToken || null,
+    mainWindow: appCallbacks.mainWindow || null
+  });
+  startRemoteAPI(settings.remoteControlPort || 3003);
+
   registerIPCHandlers();
   initialized = true;
-  console.log('[Chatbot] Full agent chatbot initialized');
+  console.log('[Chatbot] Full agent chatbot initialized with remote control');
 }
 
 function registerIPCHandlers() {
@@ -106,10 +119,26 @@ function registerIPCHandlers() {
 
   // ── Status ─────────────────────────────────────────────────────────────────
   ipcMain.handle('chatbot:status', () => {
-    return { initialized, model: 'claude-sonnet-4-6', historyLength: getHistory().length };
+    return {
+      initialized,
+      model: 'claude-sonnet-4-6',
+      historyLength: getHistory().length,
+      sessions: listSessions()
+    };
   });
 
-  console.log('[Chatbot] IPC handlers registered');
+  // ── Remote control stats ────────────────────────────────────────────────────
+  ipcMain.handle('remote:stats', () => {
+    return getRemoteStats();
+  });
+
+  ipcMain.handle('remote:clear-session', (event, { sessionId }) => {
+    const { clearSession } = require('./claudeAgent');
+    clearSession(sessionId);
+    return { cleared: true, sessionId };
+  });
+
+  console.log('[Chatbot] IPC handlers registered (incl. remote control)');
 }
 
 function getUserFacingError(err) {

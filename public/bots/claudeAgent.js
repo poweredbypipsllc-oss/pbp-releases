@@ -10,7 +10,40 @@ const MAX_RETRIES = 3;
 let anthropic = null;
 let supabase = null;
 let appCallbacks = {};
-let conversationHistory = [];
+
+// Multi-session history — keyed by sessionId
+// 'app' = in-app chatbot, 'sms:<phone>' = remote SMS, 'api:<id>' = remote HTTP
+const sessions = new Map();
+
+function getSessionHistory(sessionId = 'app') {
+  if (!sessions.has(sessionId)) sessions.set(sessionId, []);
+  return sessions.get(sessionId);
+}
+
+function trimSession(sessionId = 'app') {
+  const history = getSessionHistory(sessionId);
+  if (history.length > MAX_HISTORY) {
+    sessions.set(sessionId, history.slice(-MAX_HISTORY));
+  }
+}
+
+function clearSession(sessionId = 'app') {
+  sessions.delete(sessionId);
+  console.log('[ClaudeAgent] Session cleared:', sessionId);
+}
+
+function clearAllSessions() {
+  sessions.clear();
+  console.log('[ClaudeAgent] All sessions cleared');
+}
+
+function listSessions() {
+  return Array.from(sessions.entries()).map(([id, history]) => ({
+    sessionId: id,
+    messageCount: history.length,
+    lastActivity: history.length > 0 ? new Date().toISOString() : null
+  }));
+}
 
 const SYSTEM_PROMPT = `You are the Summit Claims Advisors AI assistant — Sumeet's second-in-command and full operational partner.
 
@@ -248,44 +281,39 @@ async function executeTool(name, input) {
   }
 }
 
-function trimHistory() {
-  if (conversationHistory.length > MAX_HISTORY) {
-    conversationHistory = conversationHistory.slice(-MAX_HISTORY);
-  }
-}
-
-function clearHistory() {
-  conversationHistory = [];
-  console.log('[ClaudeAgent] History cleared');
-}
-
-function getHistory() {
-  return conversationHistory;
-}
+// Legacy single-session aliases (used by in-app chatbot)
+function trimHistory() { trimSession('app'); }
+function clearHistory() { clearSession('app'); }
+function getHistory() { return getSessionHistory('app'); }
 
 async function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function chat(userMessage, options = {}) {
+  return chatWithSession('app', userMessage, options);
+}
+
+async function chatWithSession(sessionId = 'app', userMessage, options = {}) {
   if (!anthropic) throw new Error('[ClaudeAgent] Not initialized — call initClaudeAgent() first');
 
-  const { imageData = null, useThinking = false, systemOverride = null } = options;
+  const { imageData = null, useThinking = false, systemOverride = null, maxTokens = MAX_TOKENS } = options;
 
   const userContent = imageData ? [
     { type: 'image', source: { type: 'base64', media_type: imageData.mimeType, data: imageData.base64 } },
     { type: 'text', text: userMessage }
   ] : userMessage;
 
-  conversationHistory.push({ role: 'user', content: userContent });
-  trimHistory();
+  const history = getSessionHistory(sessionId);
+  history.push({ role: 'user', content: userContent });
+  trimSession(sessionId);
 
   let attempt = 0;
   while (attempt <= MAX_RETRIES) {
     try {
       const params = {
         model: MODEL,
-        max_tokens: MAX_TOKENS,
+        max_tokens: maxTokens,
         system: systemOverride || SYSTEM_PROMPT,
-        messages: conversationHistory,
+        messages: getSessionHistory(sessionId),
         tools: TOOLS,
         tool_choice: { type: 'auto' }
       };
@@ -296,10 +324,9 @@ async function chat(userMessage, options = {}) {
 
       let response = await anthropic.messages.create(params);
 
-      // Agentic loop — keep going while Claude wants to use tools
       while (response.stop_reason === 'tool_use') {
         const toolBlocks = response.content.filter(b => b.type === 'tool_use');
-        conversationHistory.push({ role: 'assistant', content: response.content });
+        getSessionHistory(sessionId).push({ role: 'assistant', content: response.content });
 
         const toolResults = await Promise.all(
           toolBlocks.map(async (t) => ({
@@ -309,18 +336,18 @@ async function chat(userMessage, options = {}) {
           }))
         );
 
-        conversationHistory.push({ role: 'user', content: toolResults });
-        trimHistory();
+        getSessionHistory(sessionId).push({ role: 'user', content: toolResults });
+        trimSession(sessionId);
 
-        response = await anthropic.messages.create({ ...params, messages: conversationHistory });
+        response = await anthropic.messages.create({ ...params, messages: getSessionHistory(sessionId) });
       }
 
       const textBlock = response.content.find(b => b.type === 'text');
       const text = textBlock?.text || '';
-      conversationHistory.push({ role: 'assistant', content: response.content });
-      trimHistory();
+      getSessionHistory(sessionId).push({ role: 'assistant', content: response.content });
+      trimSession(sessionId);
 
-      return { text, usage: response.usage, stop_reason: response.stop_reason };
+      return { text, usage: response.usage, stop_reason: response.stop_reason, sessionId };
 
     } catch (err) {
       if (err.status === 429 && attempt < MAX_RETRIES) {
@@ -336,31 +363,34 @@ async function chat(userMessage, options = {}) {
 }
 
 async function* chatStream(userMessage, options = {}) {
+  yield* chatStreamWithSession('app', userMessage, options);
+}
+
+async function* chatStreamWithSession(sessionId = 'app', userMessage, options = {}) {
   if (!anthropic) throw new Error('[ClaudeAgent] Not initialized');
 
-  const { imageData = null, systemOverride = null } = options;
+  const { imageData = null, systemOverride = null, maxTokens = MAX_TOKENS } = options;
 
   const userContent = imageData ? [
     { type: 'image', source: { type: 'base64', media_type: imageData.mimeType, data: imageData.base64 } },
     { type: 'text', text: userMessage }
   ] : userMessage;
 
-  conversationHistory.push({ role: 'user', content: userContent });
-  trimHistory();
+  getSessionHistory(sessionId).push({ role: 'user', content: userContent });
+  trimSession(sessionId);
 
   const baseParams = {
     model: MODEL,
-    max_tokens: MAX_TOKENS,
+    max_tokens: maxTokens,
     system: systemOverride || SYSTEM_PROMPT,
     tools: TOOLS,
     tool_choice: { type: 'auto' }
   };
 
-  let messages = [...conversationHistory];
   let continueLoop = true;
 
   while (continueLoop) {
-    const stream = anthropic.messages.stream({ ...baseParams, messages });
+    const stream = anthropic.messages.stream({ ...baseParams, messages: [...getSessionHistory(sessionId)] });
 
     let accContent = [];
     let curTool = null;
@@ -394,7 +424,7 @@ async function* chatStream(userMessage, options = {}) {
     }
 
     if (hasToolUse) {
-      messages.push({ role: 'assistant', content: accContent });
+      getSessionHistory(sessionId).push({ role: 'assistant', content: accContent });
       const toolUseBlocks = accContent.filter(b => b.type === 'tool_use');
       const toolResults = await Promise.all(
         toolUseBlocks.map(async (t) => ({
@@ -403,11 +433,12 @@ async function* chatStream(userMessage, options = {}) {
           content: JSON.stringify(await executeTool(t.name, t.input))
         }))
       );
-      messages.push({ role: 'user', content: toolResults });
+      getSessionHistory(sessionId).push({ role: 'user', content: toolResults });
+      trimSession(sessionId);
       yield { type: 'tool_done' };
     } else {
-      conversationHistory.push({ role: 'assistant', content: accContent });
-      trimHistory();
+      getSessionHistory(sessionId).push({ role: 'assistant', content: accContent });
+      trimSession(sessionId);
       continueLoop = false;
       yield { type: 'done' };
     }
@@ -418,8 +449,13 @@ module.exports = {
   initClaudeAgent,
   chat,
   chatStream,
+  chatWithSession,
+  chatStreamWithSession,
   clearHistory,
+  clearSession,
+  clearAllSessions,
   getHistory,
+  listSessions,
   executeTool,
   TOOLS,
   SYSTEM_PROMPT
