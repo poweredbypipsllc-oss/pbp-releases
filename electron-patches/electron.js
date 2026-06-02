@@ -196,14 +196,14 @@ function readSettingsFile() {
 }
 
 /* ── Service initialisation — called on startup and whenever settings are saved ── */
-function initServicesFromSettings(settings) {
+function initServicesFromSettings(s) {
   // Twilio SMS
-  if (settings.twilioSid && settings.twilioToken) {
+  if (s.mp_twilio_sid && s.mp_twilio_token) {
     initTwilio(
-      settings.twilioSid,
-      settings.twilioToken,
-      settings.twilioFrom || '+19046898998',
-      settings.myPhone
+      s.mp_twilio_sid,
+      s.mp_twilio_token,
+      s.mp_twilio_from || '+19046898998',
+      s.mp_twilio_my_phone
     );
     startInboundWebhook(3001, {
       getStatus: () => `Bot running. County scanner: ${countyIsRunning ? 'active' : 'idle'}.`,
@@ -221,15 +221,23 @@ function initServicesFromSettings(settings) {
   }
 
   // Retell AI voice calls
-  if (settings.retellApiKey && settings.retellAgentId) {
-    initRetell(settings.retellApiKey, settings.retellAgentId, settings.retellPhoneNumberId || '');
+  if (s.mp_retell_api_key && s.mp_retell_agent_id) {
+    initRetell(s.mp_retell_api_key, s.mp_retell_agent_id, s.mp_retell_phone_number_id || '');
     startRetellWebhook(3002, (event) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('retell-call-event', event);
     });
   }
 
   // Claude agent + support chatbot + remote control API
-  initChatbot(settings, {
+  initChatbot({
+    claudeApiKey:        s.mp_anthropic_key,
+    supabaseUrl:         s.mp_supabase_url,
+    supabaseKey:         s.mp_supabase_anon_key,
+    smtpUser:            s.mp_smtp_user,
+    smtpPass:            s.mp_smtp_pass,
+    remoteControlToken:  s.mp_remote_control_token,
+    remoteControlPort:   s.mp_remote_control_port ? Number(s.mp_remote_control_port) : 3003,
+  }, {
     mainWindow,
     getBotStatus: async (county) => ({
       countyRunning: countyIsRunning,
@@ -241,10 +249,6 @@ function initServicesFromSettings(settings) {
         mainWindow.webContents.send('trigger-scan', { counties, priority });
       }
       return { queued: counties };
-    },
-    sendEmail: async (to, subject, body) => {
-      // Forwarded to smtpService inside chatbotService
-      return { sent: true, to };
     }
   });
 }
